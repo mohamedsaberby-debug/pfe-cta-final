@@ -336,6 +336,50 @@
         #vanne-froid   { bottom: 5%; left: 37%; border-color: #2563eb; }
         #vanne-froid .extra-label { color: #2563eb; }
         #vanne-froid .extra-value { color: #1d4ed8; }
+        #regulation-mode { bottom: 22%; right: 7%; }
+
+        /* Regulation toggle button */
+        .regulation-toggle {
+            position: absolute;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(8px);
+            border: 2px solid var(--success);
+            border-radius: var(--radius);
+            padding: 0.5rem 0.9rem;
+            font-family: var(--font);
+            font-size: 0.78rem;
+            text-align: center;
+            cursor: pointer;
+            min-width: 100px;
+            z-index: 10;
+            transition: border-color 0.3s, background 0.3s;
+            user-select: none;
+        }
+        .regulation-toggle .reg-label {
+            font-weight: 600;
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            margin-bottom: 0.2rem;
+        }
+        .regulation-toggle .reg-value {
+            font-weight: 700;
+            font-size: 1rem;
+            color: var(--success);
+            transition: color 0.3s;
+        }
+        .regulation-toggle.manual-mode {
+            border-color: #f59e0b;
+        }
+        .regulation-toggle.manual-mode .reg-value {
+            color: #b45309;
+        }
+        .vanne-auto-locked {
+            opacity: 0.55;
+            cursor: not-allowed !important;
+            pointer-events: none;
+        }
         #temp-aller    { top: 43%;   right: 25%; }
         #temp-retour   { top: 56%;   right: 25%; }
 
@@ -965,6 +1009,11 @@
                 <div class="value" id="co2-value">450 PPM</div>
             </div>
 
+            <div class="regulation-toggle visible" id="regulation-mode" onclick="toggleRegulationMode()" title="Basculer entre régulation automatique et manuelle">
+                <div class="reg-label">Régulation</div>
+                <div class="reg-value" id="regulation-mode-value">AUTO</div>
+            </div>
+
             <div class="extra-temp-box visible" id="vanne-chaud" onclick="onComponentClick('vanne-chaud')" title="Cliquer pour saisir la valeur" style="cursor:pointer;">
                 <div class="extra-label">Vanne Chaud</div>
                 <div class="extra-value" id="vanne-chaud-value">65%</div>
@@ -1035,6 +1084,41 @@
             <div style="margin-bottom:0.5rem; font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase; letter-spacing:.05em;">Bilan journalier — 7 derniers jours <code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:0.7rem;">SUM(energie_kwh)</code></div>
             <div style="height: 220px; width: 100%;">
                 <canvas id="energyChart"></canvas>
+            </div>
+
+            <!-- Courbe de régulation vanne -->
+            <div style="margin-top:2rem;">
+                <div style="margin-bottom:0.5rem; font-size:0.8rem; color:var(--text-muted); font-weight:600; text-transform:uppercase; letter-spacing:.05em;">
+                    Courbe de régulation — Vanne Froid
+                </div>
+
+                <!-- KPI vanne -->
+                <div style="display:flex; gap:1rem; flex-wrap:wrap; margin-bottom:1rem;">
+                    <div style="display:flex; flex-direction:column; align-items:center; background:#fff7ed; border-radius:10px; padding:0.8rem 1.2rem; min-width:120px; border:1px solid #fed7aa;">
+                        <span style="font-size:0.65rem; color:#92400e; text-transform:uppercase; letter-spacing:.05em; margin-bottom:.2rem;">Ouverture Vanne</span>
+                        <span id="kpi-vanne-val" style="font-size:1.8rem; font-weight:700; color:#ea580c;">--</span>
+                        <span style="font-size:0.65rem; color:#92400e;">%</span>
+                    </div>
+                    <div style="display:flex; flex-direction:column; align-items:center; background:#f0fdf4; border-radius:10px; padding:0.8rem 1.2rem; min-width:120px; border:1px solid #bbf7d0;">
+                        <span style="font-size:0.65rem; color:#166534; text-transform:uppercase; letter-spacing:.05em; margin-bottom:.2rem;">Reprise</span>
+                        <span id="kpi-reprise-reg-val" style="font-size:1.8rem; font-weight:700; color:#16a34a;">--</span>
+                        <span style="font-size:0.65rem; color:#166534;">°C</span>
+                    </div>
+                    <div style="display:flex; flex-direction:column; align-items:center; background:#eff6ff; border-radius:10px; padding:0.8rem 1.2rem; min-width:120px; border:1px solid #bfdbfe;">
+                        <span style="font-size:0.65rem; color:#1e40af; text-transform:uppercase; letter-spacing:.05em; margin-bottom:.2rem;">Consigne</span>
+                        <span id="kpi-consigne-reg-val" style="font-size:1.8rem; font-weight:700; color:#2563eb;">--</span>
+                        <span style="font-size:0.65rem; color:#1e40af;">°C</span>
+                    </div>
+                    <div style="display:flex; flex-direction:column; align-items:center; background:#faf5ff; border-radius:10px; padding:0.8rem 1.2rem; min-width:120px; border:1px solid #e9d5ff;">
+                        <span style="font-size:0.65rem; color:#6b21a8; text-transform:uppercase; letter-spacing:.05em; margin-bottom:.2rem;">Mode</span>
+                        <span id="kpi-mode-reg-val" style="font-size:1rem; font-weight:700; color:#7c3aed;">--</span>
+                    </div>
+                </div>
+
+                <!-- Chart -->
+                <div style="height:260px; width:100%;">
+                    <canvas id="regulationChart"></canvas>
+                </div>
             </div>
         </div>
 
@@ -1196,8 +1280,11 @@
         let consigneManuallyChanged = false;
         let extracteurManuallyToggled = false;
 
-        // ── Auto-mode lock ────────────────────────────────────
+        // ── Auto-mode lock (planification) ───────────────────
         let autoModeActive = false;
+
+        // ── Regulation mode: auto = ESP32 controls valve, manual = operator controls valve ──
+        let regulationAuto = true;
 
         function notifyAutoLocked() {
             const container = document.getElementById('alarm-container');
@@ -1244,8 +1331,37 @@
             });
         }
 
+        function setRegulationMode(isAuto, sendMqtt = true) {
+            regulationAuto = isAuto;
+            const toggle = document.getElementById('regulation-mode');
+            const valueEl = document.getElementById('regulation-mode-value');
+            const vanneChaud = document.getElementById('vanne-chaud');
+            const vanneFroid = document.getElementById('vanne-froid');
+
+            if (isAuto) {
+                if (toggle)    toggle.classList.remove('manual-mode');
+                if (valueEl)   valueEl.textContent = 'AUTO';
+                if (vanneChaud) { vanneChaud.classList.add('vanne-auto-locked'); vanneChaud.title = 'Régulation automatique active — passer en Manuel pour contrôler'; }
+                if (vanneFroid) { vanneFroid.classList.add('vanne-auto-locked'); vanneFroid.title = 'Régulation automatique active'; }
+            } else {
+                if (toggle)    toggle.classList.add('manual-mode');
+                if (valueEl)   valueEl.textContent = 'MANUEL';
+                if (vanneChaud) { vanneChaud.classList.remove('vanne-auto-locked'); vanneChaud.title = 'Cliquer pour saisir la valeur'; }
+                if (vanneFroid) { vanneFroid.classList.remove('vanne-auto-locked'); vanneFroid.title = 'Cliquer pour saisir la valeur'; }
+            }
+            if (sendMqtt) {
+                sendCommand('regulation_mode', isAuto ? 'auto' : 'manual');
+            }
+        }
+
+        function toggleRegulationMode() {
+            if (autoModeActive) { notifyAutoLocked(); return; }
+            setRegulationMode(!regulationAuto);
+        }
+
         function onSliderChange(field, val) {
             if (autoModeActive) { notifyAutoLocked(); return; }
+            if ((field === 'vanne-chaud' || field === 'vanne-froid') && regulationAuto) { return; }
             const valueEl = document.getElementById(`${field}-value`);
             if (!valueEl) return;
             valueEl.textContent = val + '%';
@@ -1287,6 +1403,7 @@
             const formatted = clamped.toFixed(1) + '°C';
             valueEl.textContent = formatted;
             consigneManuallyChanged = true;
+            sendCommand('consigne', clamped);
             const el = document.getElementById('consigne');
             if (el) {
                 el.classList.add('selected');
@@ -1296,6 +1413,10 @@
 
         function changeVanne(field) {
             if (autoModeActive) { notifyAutoLocked(); return; }
+            if (regulationAuto) {
+                alert('La régulation est en mode AUTO — l\'ESP32 contrôle la vanne automatiquement.\nPassez en mode MANUEL pour intervenir.');
+                return;
+            }
             const valueEl = document.getElementById(`${field}-value`);
             if (!valueEl) return;
             const current = parseInt(valueEl.textContent) || 0;
@@ -1314,32 +1435,34 @@
         // ── Fixed positions per mode (matches the reference screenshots) ──
         const FIXED_POSITIONS = {
             Chauffage: {
-                'mode':          { top: '4%',    left: '2%',   right: 'auto', bottom: 'auto' },
-                'etat':          { top: '4%',    right: '2%',  left: 'auto',  bottom: 'auto' },
-                'temp-reprise':  { top: '1%',    left: '38%',  right: 'auto', bottom: 'auto' },
-                'consigne':      { top: '22%',   left: '30%',  right: 'auto', bottom: 'auto' },
-                'temp-ambiante': { top: '18%',   right: '7%',  left: 'auto',  bottom: 'auto' },
-                'extracteur':    { top: '43%',   left: '2%',   right: 'auto', bottom: 'auto' },
-                'co2':           { top: '57%',   left: '2%',   right: 'auto', bottom: 'auto' },
-                'temp-salle':    { bottom: '5%', left: '39%',  right: 'auto', top: 'auto'    },
-                'vanne-chaud':   { bottom: '13%', right: '22%',  left: 'auto',  top: 'auto'    },
-                'vanne-froid':   { bottom: '5%', left: '37%',  right: 'auto', top: 'auto'    },
-                'temp-aller':    { top: '43%',   right: '25%', left: 'auto',  bottom: 'auto' },
-                'temp-retour':   { top: '56%',   right: '25%', left: 'auto',  bottom: 'auto' },
+                'mode':            { top: '4%',    left: '2%',   right: 'auto', bottom: 'auto' },
+                'etat':            { top: '4%',    right: '2%',  left: 'auto',  bottom: 'auto' },
+                'temp-reprise':    { top: '1%',    left: '38%',  right: 'auto', bottom: 'auto' },
+                'consigne':        { top: '22%',   left: '30%',  right: 'auto', bottom: 'auto' },
+                'temp-ambiante':   { top: '18%',   right: '7%',  left: 'auto',  bottom: 'auto' },
+                'extracteur':      { top: '43%',   left: '2%',   right: 'auto', bottom: 'auto' },
+                'co2':             { top: '57%',   left: '2%',   right: 'auto', bottom: 'auto' },
+                'temp-salle':      { bottom: '5%', left: '39%',  right: 'auto', top: 'auto'    },
+                'regulation-mode': { bottom: '26%', right: '7%',  left: 'auto',  top: 'auto'    },
+                'vanne-chaud':     { bottom: '13%', right: '7%',  left: 'auto',  top: 'auto'    },
+                'vanne-froid':     { bottom: '5%', left: '37%',  right: 'auto', top: 'auto'    },
+                'temp-aller':      { top: '43%',   right: '25%', left: 'auto',  bottom: 'auto' },
+                'temp-retour':     { top: '56%',   right: '25%', left: 'auto',  bottom: 'auto' },
             },
             Climatisation: {
-                'mode':          { top: '4%',     left: '2%',   right: 'auto', bottom: 'auto' },
-                'etat':          { top: '4%',     right: '2%',  left: 'auto',  bottom: 'auto' },
-                'temp-reprise':  { top: '1%',     left: '38%',  right: 'auto', bottom: 'auto' },
-                'consigne':      { top: '22%',    left: '30%',  right: 'auto', bottom: 'auto' },
-                'temp-ambiante': { top: '18%',    right: '7%',  left: 'auto',  bottom: 'auto' },
-               'extracteur':    { top: '43%',   left: '2%',   right: 'auto', bottom: 'auto' },
-                'co2':           { top: '57%',   left: '2%',   right: 'auto', bottom: 'auto' },
-                'temp-salle':    { bottom: '5%',  left: '19%',  right: 'auto', top: 'auto'    },
-                'vanne-chaud':   { bottom: '5%',  right: '7%',  left: 'auto',  top: 'auto'    },
-                'vanne-froid':   { bottom: '5%',  left: '47%',  right: 'auto', top: 'auto'    },
-                'temp-aller':    { bottom: '35%', left: '35%',  right: 'auto', top: 'auto'    },
-                'temp-retour':   { bottom: '23%', left: '35%',  right: 'auto', top: 'auto'    },
+                'mode':            { top: '4%',     left: '2%',   right: 'auto', bottom: 'auto' },
+                'etat':            { top: '4%',     right: '2%',  left: 'auto',  bottom: 'auto' },
+                'temp-reprise':    { top: '1%',     left: '38%',  right: 'auto', bottom: 'auto' },
+                'consigne':        { top: '22%',    left: '30%',  right: 'auto', bottom: 'auto' },
+                'temp-ambiante':   { top: '18%',    right: '7%',  left: 'auto',  bottom: 'auto' },
+                'extracteur':      { top: '43%',    left: '2%',   right: 'auto', bottom: 'auto' },
+                'co2':             { top: '57%',    left: '2%',   right: 'auto', bottom: 'auto' },
+                'temp-salle':      { bottom: '5%',  left: '19%',  right: 'auto', top: 'auto'    },
+                'regulation-mode': { bottom: '18%', right: '7%',  left: 'auto',  top: 'auto'    },
+                'vanne-chaud':     { bottom: '5%',  right: '7%',  left: 'auto',  top: 'auto'    },
+                'vanne-froid':     { bottom: '5%',  left: '47%',  right: 'auto', top: 'auto'    },
+                'temp-aller':      { bottom: '35%', left: '35%',  right: 'auto', top: 'auto'    },
+                'temp-retour':     { bottom: '23%', left: '35%',  right: 'auto', top: 'auto'    },
             }
         };
 
@@ -1408,6 +1531,9 @@
             // Retirer toutes les classes de mode
             Object.values(MODE_CLASS).forEach(cls => el.classList.remove(cls));
             el.classList.add(MODE_CLASS[mode]);
+
+            // Sync localStorage so MQTT/Socket.io handlers read the correct aller/retour fields
+            localStorage.setItem('mode_cta', mode === 'Chauffage' ? 'chauffage' : 'clim');
 
             // Sync couleur carte
             const cardModeSpan = document.querySelector(`[data-cta="${currentCTA}-mode"]`);
@@ -1930,6 +2056,16 @@
                 // (e.g. 'CTA Centrale') always provides live data to the UI.
                 const eqName = reverseSlugMap[currentCTA];
                 const matchedEq = allEquipments.find(e => e.name === eqName) || allEquipments[0];
+
+                // Restore persisted setpoint from DB
+                if (matchedEq && matchedEq.consigne != null && !consigneManuallyChanged) {
+                    updateElement('consigne-value', parseFloat(matchedEq.consigne).toFixed(1) + '°C');
+                }
+
+                // Restore regulation mode from DB
+                if (matchedEq && matchedEq.regulation_mode) {
+                    setRegulationMode(matchedEq.regulation_mode === 'auto', false);
+                }
 
                 // Update equipment status (actif/inactif) from DB
                 if (matchedEq && !etatManuallyToggled) {
@@ -3389,6 +3525,132 @@ function showNetToast(msg, type = 'success') {
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 3500);
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  Courbe de régulation — Vanne Froid
+// ═══════════════════════════════════════════════════════════════
+(function initRegulationChart() {
+    const MAX_POINTS = 30;
+
+    const ctx = document.getElementById('regulationChart');
+    if (!ctx) return;
+
+    const regulationChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'Reprise (°C)',
+                    data: [],
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239,68,68,0.08)',
+                    tension: 0.4,
+                    pointRadius: 3,
+                    yAxisID: 'yTemp'
+                },
+                {
+                    label: 'Consigne (°C)',
+                    data: [],
+                    borderColor: '#2563eb',
+                    backgroundColor: 'transparent',
+                    borderDash: [6, 3],
+                    tension: 0,
+                    pointRadius: 0,
+                    yAxisID: 'yTemp'
+                },
+                {
+                    label: 'Ouverture Vanne (%)',
+                    data: [],
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'rgba(245,158,11,0.08)',
+                    tension: 0.4,
+                    pointRadius: 3,
+                    yAxisID: 'yVanne'
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 300 },
+            scales: {
+                yTemp: {
+                    type: 'linear',
+                    position: 'left',
+                    title: { display: true, text: '°C', color: '#ef4444' },
+                    grid: { color: '#f1f5f9' }
+                },
+                yVanne: {
+                    type: 'linear',
+                    position: 'right',
+                    min: 0,
+                    max: 100,
+                    title: { display: true, text: '%', color: '#f59e0b' },
+                    grid: { drawOnChartArea: false }
+                },
+                x: {
+                    grid: { color: '#f1f5f9' },
+                    ticks: { maxTicksLimit: 8 }
+                }
+            },
+            plugins: {
+                legend: { position: 'top' },
+                tooltip: { mode: 'index', intersect: false }
+            }
+        }
+    });
+
+    function addPoint(reprise, consigne, vanne) {
+        const time = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const d = regulationChart.data;
+
+        d.labels.push(time);
+        d.datasets[0].data.push(reprise);
+        d.datasets[1].data.push(consigne);
+        d.datasets[2].data.push(vanne);
+
+        if (d.labels.length > MAX_POINTS) {
+            d.labels.shift();
+            d.datasets.forEach(ds => ds.data.shift());
+        }
+
+        regulationChart.update();
+    }
+
+    // Écouter les données vanne depuis le backend
+    const socket = window._ctaSocket;
+    if (!socket) { console.warn('[REG CHART] Socket non prêt'); return; }
+
+    socket.on('vanne_status', function(data) {
+        const reprise = parseFloat(data.reprise) || 0;
+        const consigne = parseFloat(data.consigne) || 22;
+        const vanne = parseInt(data.vanne_ouverture) || 0;
+        const mode = data.regulation_auto ? 'AUTO' : 'MANUEL';
+
+        // Mettre à jour les KPIs
+        const kpiVanne = document.getElementById('kpi-vanne-val');
+        const kpiReprise = document.getElementById('kpi-reprise-reg-val');
+        const kpiConsigne = document.getElementById('kpi-consigne-reg-val');
+        const kpiMode = document.getElementById('kpi-mode-reg-val');
+
+        if (kpiVanne)    kpiVanne.textContent    = vanne;
+        if (kpiReprise)  kpiReprise.textContent   = reprise.toFixed(1);
+        if (kpiConsigne) kpiConsigne.textContent  = consigne.toFixed(1);
+        if (kpiMode) {
+            kpiMode.textContent = mode;
+            kpiMode.style.color = data.regulation_auto ? '#16a34a' : '#b45309';
+        }
+
+        // Mettre à jour l'affichage vanne sur le synoptique
+        if (data.regulation_auto) {
+            updateElement('vanne-froid-value', vanne + '%');
+        }
+
+        // Ajouter au graphique
+        addPoint(reprise, consigne, vanne);
+    });
+})();
 
 // Resolve CTA ID and check if any schedule is currently active on load
 resolveCtaId().then(async () => {

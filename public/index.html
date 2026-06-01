@@ -551,11 +551,12 @@ async function loadCtaList() {
             const slug = slugMap[cta.name] || 'salle-polyvalente';
             const etatColor = cta.status === 'actif' ? 'var(--success)' : 'var(--danger)';
             const temp = cta.temperature ? parseFloat(cta.temperature).toFixed(1) + '°C' : '--°C';
-            
+            const modeColor = cta.mode === 'Climatisation' ? '#2563eb' : '#f59e0b';
+
             return `
                 <a class="cta-item" href="machine.html?cta=${slug}">
                     <div class="title">${cta.name}</div>
-                    <div class="meta"><span>Mode</span><span>Chauffage</span></div>
+                    <div class="meta"><span>Mode</span><span data-idx="${slug}-mode" style="color: ${modeColor}; font-weight: 600;">${cta.mode || 'Chauffage'}</span></div>
                     <div class="meta"><span>État</span><span data-idx="${slug}-etat" style="color: ${etatColor}; font-weight: 600;">${cta.status === 'actif' ? 'Actif' : 'Inactif'}</span></div>
                     <div class="meta"><span>Température</span><span data-idx="${slug}-temp" style="color: var(--accent); font-weight: 700;">${temp}</span></div>
                     <div class="meta"><span>Consommation</span><span data-idx="${slug}-puissance" style="font-weight: 600;">${cta.puissance || 0} W</span></div>
@@ -641,6 +642,15 @@ function doLogout() {
                 const slug = slugMap[eq.name];
                 
                 if (!slug) return;
+
+                // Update mode
+                const modeSpan = document.querySelector(`[data-idx="${slug}-mode"]`);
+                if (modeSpan) {
+                    const modeText = eq.mode || 'Chauffage';
+                    modeSpan.textContent = modeText;
+                    modeSpan.style.color = modeText === 'Climatisation' ? '#2563eb' : '#f59e0b';
+                    modeSpan.style.fontWeight = '600';
+                }
 
                 // Update status
                 const etatSpan = document.querySelector(`[data-idx="${slug}-etat"]`);

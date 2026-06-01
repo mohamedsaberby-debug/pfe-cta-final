@@ -56,13 +56,14 @@ async function initializeDatabase() {
             CREATE TABLE IF NOT EXISTS cta (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 nom VARCHAR(50) NOT NULL,
-                etat VARCHAR(20) DEFAULT 'inactif'
+                etat VARCHAR(20) DEFAULT 'inactif',
+                mode VARCHAR(20) DEFAULT 'Chauffage'
             )
         `);
-        // Ajouter la colonne etat si elle n'existe pas (migration base existante)
-        await dbPool.query(`
-            ALTER TABLE cta ADD COLUMN IF NOT EXISTS etat VARCHAR(20) DEFAULT 'inactif'
-        `).catch(() => {});
+        try { await dbPool.query(`ALTER TABLE cta ADD COLUMN etat VARCHAR(20) DEFAULT 'inactif'`); } catch(e) {}
+        try { await dbPool.query(`ALTER TABLE cta ADD COLUMN mode VARCHAR(20) DEFAULT 'Chauffage'`); } catch(e) {}
+        try { await dbPool.query(`ALTER TABLE cta ADD COLUMN consigne FLOAT DEFAULT 22`); } catch(e) {}
+        try { await dbPool.query(`ALTER TABLE cta ADD COLUMN regulation_mode VARCHAR(10) DEFAULT 'auto'`); } catch(e) {}
 
         // 2. Temperature Table
         await dbPool.query(`
@@ -235,6 +236,24 @@ mqttClient.on('connect', () => {
 mqttClient.on('message', async (topic, payload) => {
     const lowerTopic = topic.toLowerCase();
 
+    // ── Vanne ESP32 status (cta/vanne/status) ────────────────────
+    if (lowerTopic.includes('vanne/status')) {
+        try {
+            const data = JSON.parse(payload.toString());
+            console.log(`[VANNE STATUS] ${JSON.stringify(data)}`);
+            io.emit('vanne_status', {
+                vanne_ouverture: data.vanne_ouverture ?? 0,
+                consigne:        data.consigne ?? 22,
+                reprise:         data.reprise ?? 0,
+                regulation_auto: data.regulation_auto ?? true,
+                timestamp:       new Date()
+            });
+        } catch(e) {
+            console.error('[VANNE STATUS] Parse error:', e.message);
+        }
+        return;
+    }
+
     // ── ENS160 : qualité d'air (cta/+/sensors) ───────────────────
     if (lowerTopic.includes('/sensors')) {
         try {
@@ -251,6 +270,44 @@ mqttClient.on('message', async (topic, payload) => {
                         "INSERT INTO air_quality (cta_id, aqi, tvoc, eco2) VALUES (?, ?, ?, ?)",
                         [ctaId, data.aqi ?? null, data.tvoc ?? null, data.eco2 ?? null]
                     );
+                }
+
+                // Vérifier le seuil de température salle
+                if (data.salle !== undefined) {
+                    if (!global.activeAlarms) global.activeAlarms = {};
+                    const [seuils] = await dbPool.query("SELECT * FROM seuils WHERE nom = 'salle'");
+                    for (const seuil of seuils) {
+                        const val = data.salle;
+                        const alarmKey = `cta_${ctaId}_salle`;
+                        let isBreached = false;
+                        if (seuil.max !== null && val > seuil.max) isBreached = true;
+                        if (seuil.min !== null && val < seuil.min) isBreached = true;
+
+                        if (isBreached) {
+                            if (!global.activeAlarms[alarmKey]) {
+                                global.activeAlarms[alarmKey] = true;
+                                await dbPool.query(
+                                    "INSERT INTO alertes (cta_id, type, message, valeur, niveau) VALUES (?, ?, ?, ?, ?)",
+                                    [ctaId, seuil.type, `Alerte Seuil: salle est à ${val}°C`, val, 'danger']
+                                );
+                                io.emit('alarm', {
+                                    ctaId, type: seuil.type,
+                                    message: `Alerte Seuil: salle est à ${val}°C`,
+                                    severity: 'danger', value: val, created_at: new Date()
+                                });
+                            }
+                        } else {
+                            const hyst = 0.5;
+                            const thresholdMax = parseFloat(seuil.max);
+                            const thresholdMin = parseFloat(seuil.min);
+                            let dangerous = false;
+                            if (!isNaN(thresholdMax) && val > (thresholdMax - hyst)) dangerous = true;
+                            if (!isNaN(thresholdMin) && val < (thresholdMin + hyst)) dangerous = true;
+                            if (!dangerous && global.activeAlarms[alarmKey]) {
+                                global.activeAlarms[alarmKey] = false;
+                            }
+                        }
+                    }
                 }
 
                 // Envoyer au dashboard via Socket.io
@@ -274,7 +331,12 @@ mqttClient.on('message', async (topic, payload) => {
                 if (ctaRows.length === 0) return;
                 const ctaId = ctaRows[0].id;
 
-                // 2. Process Temperature Data (throttled to 1 record per 15 minutes)
+                // 2. Forward reprise to valve ESP32 via MQTT
+                if (data.reprise !== undefined && data.reprise > 0) {
+                    mqttClient.publish('cta/1/reprise', JSON.stringify({ reprise: data.reprise }));
+                }
+
+                // 2b. Process Temperature Data (throttled to 1 record per 15 minutes)
                 if (data.reprise !== undefined) {
                     if (!global.lastTempInsert) global.lastTempInsert = {};
                     const now = Date.now();
@@ -649,7 +711,10 @@ app.get('/api/telemetry/latest', async (req, res) => {
 
             results.push({
                 name: cta.nom,
-                status: 'actif',
+                status: cta.etat || 'inactif',
+                mode: cta.mode || 'Chauffage',
+                consigne: cta.consigne != null ? parseFloat(cta.consigne) : 22,
+                regulation_mode: cta.regulation_mode || 'auto',
                 temperature: t[0] ? t[0].salle : null,
                 reprise: t[0] ? t[0].reprise : null,
                 soufflage: t[0] ? t[0].soufflage : null,
@@ -696,10 +761,20 @@ app.post('/api/commands', async (req, res) => {
             value: value 
         });
 
-        mqttClient.publish(topic, payload, (err) => {
+        mqttClient.publish(topic, payload, async (err) => {
             if (err) {
                 console.error('[MQTT] Publish Error:', err);
                 return res.status(500).json({ error: 'MQTT Publish failed' });
+            }
+            // Persister le mode en base quand une commande mode est envoyée
+            if (actuatorType === 'mode' && value && dbPool) {
+                await dbPool.query('UPDATE cta SET mode = ? WHERE id = ?', [value, deviceId]).catch(() => {});
+            }
+            if (actuatorType === 'consigne' && value !== undefined && dbPool) {
+                await dbPool.query('UPDATE cta SET consigne = ? WHERE id = ?', [parseFloat(value), deviceId]).catch(() => {});
+            }
+            if (actuatorType === 'regulation_mode' && value && dbPool) {
+                await dbPool.query('UPDATE cta SET regulation_mode = ? WHERE id = ?', [value, deviceId]).catch(() => {});
             }
             console.log(`[MQTT] Command Sent → ${topic}: ${payload}`);
             res.json({ success: true, message: `Command sent to ${topic}` });
@@ -834,7 +909,7 @@ app.delete('/api/schedules/:id', async (req, res) => {
 // Network Config Routes (ESP32 IP management)
 // ═══════════════════════════════════════════════════════════
 
-// GET all ESP device configs
+// GET all ESP device gs
 app.get('/api/network/devices', async (req, res) => {
     try {
         if (!dbPool) return res.status(500).json({ error: 'DB not initialized' });
@@ -980,6 +1055,7 @@ function startScheduler() {
 
                 if (inTime && !wasActive) {
                     global.activeSchedules[s.id] = true;
+                    await dbPool.query('UPDATE cta SET mode = ? WHERE id = ?', [s.mode, s.cta_id]).catch(() => {});
                     mqttClient.publish(`cta/${s.cta_id}/commands`, JSON.stringify({
                         actuatorType: 'schedule_start',
                         value: { mode: s.mode, consigne: s.consigne, scheduleId: s.id, name: s.name }
@@ -1011,9 +1087,32 @@ function startScheduler() {
     console.log('⏰ Schedule checker started (every 60s)');
 }
 
+// ─── Publie la reprise vers la vanne ESP32 toutes les 5s ──────
+function startReprisePublisher() {
+    async function publishReprise() {
+        if (!dbPool) return;
+        try {
+            const [rows] = await dbPool.query(
+                'SELECT reprise FROM cta_temperature WHERE reprise IS NOT NULL AND reprise > 0 ORDER BY id DESC LIMIT 1'
+            );
+            if (rows.length > 0 && rows[0].reprise > 0) {
+                const payload = JSON.stringify({ reprise: rows[0].reprise });
+                mqttClient.publish('cta/1/reprise', payload);
+                console.log(`[REPRISE] Publié → cta/1/reprise: ${payload}`);
+            }
+        } catch (err) {
+            console.error('[REPRISE] Erreur:', err.message);
+        }
+    }
+
+    setInterval(publishReprise, 5000);
+    console.log('🌡️  Reprise publisher started (every 5s)');
+}
+
 // Start Express Server
 httpServer.listen(PORT, async () => {
     console.log(`🚀 CTA Backend & WebSocket Server running on port ${PORT}`);
     await initializeDatabase();
     startScheduler();
+    startReprisePublisher();
 });
